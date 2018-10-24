@@ -61,6 +61,7 @@ limitations under the License.
 #include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/tensor_slice_reader_cache.h"
+#include "tensorflow/core/platform/env_time.h"
 
 namespace tensorflow {
 namespace {
@@ -1250,6 +1251,7 @@ class ExecutorState {
   Executor::Args::Runner runner_;
   bool sync_on_finish_;
   const bool trace_using_annotations_;
+  bool print_this_run_;
 
   // Owned.
 
@@ -1374,6 +1376,7 @@ ExecutorState::ExecutorState(const Executor::Args& args, ExecutorImpl* impl)
       runner_(args.runner),
       sync_on_finish_(args.sync_on_finish),
       trace_using_annotations_(impl->params_.device->TraceUsingAnnotations()),
+      print_this_run_(args.print_this_run),
       num_outstanding_ops_(0) {
   // We start the entire execution in iteration 0 of the root frame
   // so let us create the root frame and the state for iteration 0.
@@ -1622,6 +1625,7 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
 
   EntryVector outputs;
   bool completed = false;
+  static EnvTime* env_time = tensorflow::EnvTime::Default();
   inline_ready.push_back(tagged_node);
   while (!inline_ready.empty()) {
     tagged_node = inline_ready.front();
@@ -1631,6 +1635,11 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
     const int64 input_iter = tagged_node.input_iter;
     const int id = node->id();
     const NodeItem& item = *gview.node(id);
+    uint64_t ts = 0;
+
+    if (print_this_run_) {
+      ts = env_time->NowMicros();
+    }
 
     // TODO(misard) Replace with a finer-grain enabling flag once we
     // add better optional debugging support.
@@ -1822,6 +1831,14 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
       }
       // Postprocess.
       completed = NodeDone(s, item.node, ready, stats, &inline_ready);
+    }
+    if (print_this_run_) {
+      uint64_t time = env_time->NowMicros() - ts;
+      std::stringstream ss;
+      ss << "step " << step_id_ <<
+        ", op " << node->def().op() <<
+        ", device " << device->name();
+      env_time->PrintTime("process", ts, time, true, ss.str());
     }
   }  // while !inline_ready.empty()
 
@@ -2363,6 +2380,10 @@ void ExecutorState::DumpState() {
 }
 
 void ExecutorState::Finish() {
+  static EnvTime* env_time = tensorflow::EnvTime::Default();
+  uint64_t start;
+  if (print_this_run_)
+    start = env_time->NowMicros();
   mu_.lock();
   auto status = status_;
   auto done_cb = std::move(done_cb_);
@@ -2375,6 +2396,10 @@ void ExecutorState::Finish() {
     // methods have completed, this ensures that control is not returned to
     // the user until the step (and its side-effects) has actually completed.
     status.Update(device->Sync());
+    if (print_this_run_) {
+      uint64_t time = env_time->NowMicros() - start;
+      env_time->PrintTime("finish", start, time, true);
+    }
   }
 
   delete this;
