@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <cstdlib>
+#include <fstream>
 
 #include "tensorflow/contrib/verbs/rdma.h"
 #include "tensorflow/contrib/verbs/verbs_service.pb.h"
@@ -38,6 +39,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/hash/hash.h"
 #include "tensorflow/core/lib/random/random.h"
+#include "tensorflow/core/platform/numa.h"
 
 namespace tensorflow {
 
@@ -421,6 +423,108 @@ RdmaAdapter::~RdmaAdapter() {
       << "Failed to destroy channel";
   CHECK(!ibv_dealloc_pd(pd_)) << "Failed to deallocate PD";
   CHECK(!ibv_close_device(context_)) << "Failed to release context";
+}
+
+static int TryToReadNumaNode(ibv_device* device) {
+#if defined(__APPLE__)
+  LOG(INFO) << "OS X does not support NUMA - returning NUMA node 0";
+  return 0;
+#elif defined(PLATFORM_WINDOWS)
+  // Windows support for NUMA is not currently implemented. Return node 0.
+  return 0;
+#else
+  VLOG(2) << "Trying to read NUMA node for device: " << device->name;
+  static const int kUnknownNumaNode = -1;
+
+  auto filename = string(device->ibdev_path) + "/device/numa_node";
+
+  std::ifstream ifs(filename.c_str());
+  string content;
+  CHECK(std::getline(ifs, content));
+
+  int32 value;
+  if (strings::safe_strto32(content, &value)) {
+    if (value < 0) {
+      LOG(INFO) << "Successful NUMA node read from SysFS had negative value ("
+                << value
+                << "), but there must be at least one NUMA node"
+                   ", so returning NUMA node zero";
+      return 0;
+    }
+    LOG(INFO) << "NUMA node for device: " << device->name << " is " << value;
+    return value;
+  }
+  return kUnknownNumaNode;
+#endif
+}
+
+static bool IsGDRAvailable() {
+#if defined(__APPLE__)
+  return false;
+#elif defined(PLATFORM_WINDOWS)
+  return false;
+#elif TENSORFLOW_USE_ROCM
+  return true;
+#else
+  std::ifstream ifs("/proc/modules");
+  string line;
+  while (std::getline(ifs, line)) {
+    auto sep = line.find(' ');
+    CHECK_NE(sep, std::string::npos);
+    if (line.substr(0, sep) == "nv_peer_mem") {
+      return true;
+    }
+  }
+  return false;
+#endif
+}
+
+void RdmaAdapter::RegMemVisitors() {
+  numa_node_ = TryToReadNumaNode(context_->device) + 1;
+
+  SubAllocator::Visitor alloc_visitor = [](void* ptr, int numa_node,
+                                           size_t num_bytes) {
+    VLOG(2) << "Registering RDMA capable memory region on numa_node "
+            << numa_node;
+    RdmaMemoryMgr::Singleton().InsertMemoryRegion(
+        ptr, num_bytes, strings::StrCat("CPU:", numa_node));
+  };
+  SubAllocator::Visitor free_visitor = [](void* ptr, int numa_node,
+                                          size_t num_bytes) {
+    VLOG(2) << "De-registering RDMA capable memory region on numa_node "
+            << numa_node;
+    RdmaMemoryMgr::Singleton().EvictMemoryRegion(ptr, num_bytes);
+  };
+
+  ProcessState::singleton()->AddCPUAllocVisitor(alloc_visitor);
+  ProcessState::singleton()->AddCPUFreeVisitor(free_visitor);
+  LOG(INFO) << "Instrumenting CPU allocator(s)";
+
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  for (int numa_idx = 0; numa_idx < port::NUMANumNodes(); ++numa_idx) {
+    GPUProcessState::singleton()->AddGPUHostAllocVisitor(numa_idx,
+                                                         alloc_visitor);
+    GPUProcessState::singleton()->AddGPUHostFreeVisitor(numa_idx,
+                                                        free_visitor);
+    LOG(INFO) << "Instrumenting GPU host allocator " << numa_idx;
+  }
+  if (IsGDRAvailable()) {
+    // Note we don't free allocated GPU memory so there is no free visitor
+    SubAllocator::Visitor cuda_alloc_visitor = [](void* ptr, int gpu_id,
+                                                  size_t num_bytes) {
+      VLOG(2) << "Registering RDMA capable memory region on GPU " << gpu_id;
+      RdmaMemoryMgr::Singleton().InsertMemoryRegion(
+          ptr, num_bytes, strings::StrCat("GPU:", gpu_id));
+    };
+    for (int numa_idx = 0; numa_idx < port::NUMANumNodes(); ++numa_idx) {
+      GPUProcessState::singleton()->AddGPUAllocVisitor(numa_idx,
+                                                       cuda_alloc_visitor);
+      LOG(INFO) << "Instrumenting GPU device allocator " << numa_idx;
+    }
+    LOG(INFO) << "Instrumented GPU allocator(s) for all "
+              << port::NUMANumNodes() << " numas ";
+  }
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 }
 
 void RdmaAdapter::StartPolling() {
@@ -1084,7 +1188,9 @@ void RdmaTensorResponse::RecvHandler(Rendezvous::ParsedKey parsed,
       // The tensor must be copied from GPU to CPU, because either:
       // 1. The tensor is located on a non GDR compatible GPU.
       // 2. The tensor's meta-data has changed.
-      Allocator* alloc = GPUProcessState::singleton()->GetGPUHostAllocator(0);
+      Allocator* alloc = GPUProcessState::singleton()->GetGPUHostAllocator(
+          //RdmaMemoryMgr::Singleton().numa_node_);
+          0);
       copy = Tensor(alloc, in.dtype(), in.shape());
       CountCopies(rm_.name_, (void*)DMAHelper::base(&in),
                   (void*)DMAHelper::base(&copy), in.TotalBytes(), true);
@@ -1204,6 +1310,12 @@ void RdmaTensorResponse::SendContent(const Tensor& in, const TensorProto& proto,
         src_addr_ = src_buffer_->data();
         mr_ = RdmaMemoryMgr::Singleton().FindMemoryRegion(src_addr_,
                                                           tensor_bytes);
+        if (mr_ == nullptr && tensor_bytes) {
+          RdmaMemoryMgr::Singleton().InsertMemoryRegion(
+              src_addr_, tensor_bytes, "CPU::RT");
+          mr_ = RdmaMemoryMgr::Singleton().FindMemoryRegion(src_addr_,
+                                                            tensor_bytes);
+        }
       }
     } else {
       RDMA_LOG(2) << "Encoding proto: " << rm_.name_
@@ -1539,13 +1651,17 @@ bool RdmaTensorRequest::AllocateTensors() {
     mr_ = RdmaMemoryMgr::Singleton().FindMemoryRegion(rdma_addr_, tensor_size);
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
     if (mr_ == nullptr) {
+      RDMA_LOG(1) << "Failed to find memory region, allocating proxy";
       // Can't RDMA directly to result. Use a proxy.
       proxy_tensor_ =
-          new Tensor(GPUProcessState::singleton()->GetGPUHostAllocator(0),
+          new Tensor(GPUProcessState::singleton()->GetGPUHostAllocator(
+                         //RdmaMemoryMgr::Singleton().numa_node_),
+                         0),
                      result_tensor_->dtype(), result_tensor_->shape());
       rdma_addr_ = DMAHelper::base(proxy_tensor_);
       mr_ =
           RdmaMemoryMgr::Singleton().FindMemoryRegion(rdma_addr_, tensor_size);
+      if (mr_ == nullptr) RDMA_LOG(1) << "Failed to find memory region";
     }
 #endif
   } else {
@@ -1553,6 +1669,7 @@ bool RdmaTensorRequest::AllocateTensors() {
     rdma_addr_ = malloc(proto_size);
     mr_ = ibv_reg_mr(RdmaMemoryMgr::Singleton().pd_, rdma_addr_, proto_size,
                      IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    if (mr_ == nullptr) RDMA_LOG(1) << "Failed to register memory region";
   }
   CHECK(mr_ != nullptr) << " No memory region found for address " << rdma_addr_
                         << ": " << key_;

@@ -212,6 +212,7 @@ class RdmaMemoryMgr {
                                           bool is_dead, size_t proto_size);
 
   struct ibv_pd* pd_;
+  int numa_node_;
 
  protected:
   RdmaMemoryMgr() : pd_(nullptr) {}
@@ -382,6 +383,7 @@ class RdmaAdapter {
   string name() const;
   void StartPolling();
   void Process_CQ();
+  void RegMemVisitors();
 
  protected:
   static const int MAX_CONCURRENT_WRITES = 1000;
@@ -400,6 +402,8 @@ class RdmaAdapter {
   const WorkerEnv* worker_env_;
   // thread for cq.
   std::unique_ptr<Thread> polling_thread_;
+  // bus id for GDR numa allocator
+  int numa_node_;
 };
 
 // Class that represents a connection to a remote Rdma peer.

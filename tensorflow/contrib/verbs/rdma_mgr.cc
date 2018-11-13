@@ -16,7 +16,6 @@ limitations under the License.
 #ifdef TENSORFLOW_USE_VERBS
 
 #include "tensorflow/contrib/verbs/rdma_mgr.h"
-#include <fstream>
 #include <vector>
 #include "tensorflow/contrib/verbs/grpc_verbs_client.h"
 #include "tensorflow/contrib/verbs/verbs_service.pb.h"
@@ -33,9 +32,11 @@ limitations under the License.
 namespace tensorflow {
 
 RdmaMgr::RdmaMgr(const WorkerEnv* const worker_env,
-                 GrpcChannelCache* const channel_cache)
-    : worker_env_(worker_env), channel_cache_(channel_cache) {
-  rdma_adapter_ = new RdmaAdapter(worker_env_);
+                 GrpcChannelCache* const channel_cache,
+                 RdmaAdapter* rdma_adapter)
+    : worker_env_(worker_env),
+      channel_cache_(channel_cache),
+      rdma_adapter_(rdma_adapter) {
   // hardcoded to default session (legacy_session_)
   // TODO: use WorkerSessionForSession
   // need to pass in session handle
@@ -198,60 +199,6 @@ RdmaChannel* RdmaMgr::FindChannel(const string& name) {
   return iter->second;
 }
 
-bool IsGDRAvailable() {
-#if defined(__APPLE__)
-  return false;
-#elif defined(PLATFORM_WINDOWS)
-  return false;
-#elif TENSORFLOW_USE_ROCM
-  return true;
-#else
-  std::ifstream ifs("/proc/modules");
-  string line;
-  while (std::getline(ifs, line)) {
-    auto sep = line.find(' ');
-    CHECK_NE(sep, std::string::npos);
-    if (line.substr(0, sep) == "nv_peer_mem") {
-      return true;
-    }
-  }
-  return false;
-#endif
-}
-
-int TryToReadNumaNode(ibv_device* device) {
-#if defined(__APPLE__)
-  LOG(INFO) << "OS X does not support NUMA - returning NUMA node 0";
-  return 0;
-#elif defined(PLATFORM_WINDOWS)
-  // Windows support for NUMA is not currently implemented. Return node 0.
-  return 0;
-#else
-  VLOG(2) << "Trying to read NUMA node for device: " << device->name;
-  static const int kUnknownNumaNode = -1;
-
-  auto filename = string(device->ibdev_path) + "/device/numa_node";
-
-  std::ifstream ifs(filename.c_str());
-  string content;
-  CHECK(std::getline(ifs, content));
-
-  int32 value;
-  if (strings::safe_strto32(content, &value)) {
-    if (value < 0) {
-      LOG(INFO) << "Successful NUMA node read from SysFS had negative value ("
-                << value
-                << "), but there must be at least one NUMA node"
-                   ", so returning NUMA node zero";
-      return 0;
-    }
-    LOG(INFO) << "NUMA node for device: " << device->name << " is " << value;
-    return value;
-  }
-  return kUnknownNumaNode;
-#endif
-}
-
 void MRDeleter(ibv_mr* mr) {
   if (mr) {
     ibv_dereg_mr(mr);
@@ -261,41 +208,10 @@ void MRDeleter(ibv_mr* mr) {
 void RdmaMgr::InitAllocators() {
   static std::once_flag flag;
   std::call_once(
-      flag, [this]() { RdmaMemoryMgr::Singleton().pd_ = rdma_adapter_->pd_; });
-}
-
-void RdmaMgr::RegMemVisitors() {
-  SubAllocator::Visitor alloc_visitor = [](void* ptr, int numa_node,
-                                           size_t num_bytes) {
-    RdmaMemoryMgr::Singleton().InsertMemoryRegion(
-        ptr, num_bytes, strings::StrCat("CPU:", numa_node));
-  };
-  SubAllocator::Visitor free_visitor = [](void* ptr, int numa_node,
-                                          size_t num_bytes) {
-    RdmaMemoryMgr::Singleton().EvictMemoryRegion(ptr, num_bytes);
-  };
-
-  ProcessState::singleton()->AddCPUAllocVisitor(alloc_visitor);
-  ProcessState::singleton()->AddCPUFreeVisitor(free_visitor);
-
-#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-  if (IsGDRAvailable()) {
-    // Note we don't free allocated GPU memory so there is no free visitor
-    int32_t bus_id = TryToReadNumaNode(rdma_adapter_->context_->device) + 1;
-
-    SubAllocator::Visitor cuda_alloc_visitor = [](void* ptr, int gpu_id,
-                                                  size_t num_bytes) {
-      RdmaMemoryMgr::Singleton().InsertMemoryRegion(
-          ptr, num_bytes, strings::StrCat("GPU:", gpu_id));
-    };
-    GPUProcessState::singleton()->AddGPUAllocVisitor(bus_id,
-                                                     cuda_alloc_visitor);
-    GPUProcessState::singleton()->AddGPUHostAllocVisitor(bus_id,
-                                                          alloc_visitor);
-    GPUProcessState::singleton()->AddGPUHostFreeVisitor(bus_id, free_visitor);
-    LOG(INFO) << "Instrumenting GPU allocator with bus_id " << bus_id;
-  }
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+      flag, [this]() {
+          RdmaMemoryMgr::Singleton().pd_ = rdma_adapter_->pd_;
+          RdmaMemoryMgr::Singleton().numa_node_ = rdma_adapter_->numa_node_;
+  });
 }
 
 }  // end namespace tensorflow
