@@ -33,9 +33,11 @@ limitations under the License.
 namespace tensorflow {
 
 RdmaMgr::RdmaMgr(const WorkerEnv* const worker_env,
-                 GrpcChannelCache* const channel_cache)
-    : worker_env_(worker_env), channel_cache_(channel_cache) {
-  rdma_adapter_ = new RdmaAdapter(worker_env_);
+                 GrpcChannelCache* const channel_cache,
+                 RdmaAdapter* rdma_adapter)
+    : worker_env_(worker_env),
+      channel_cache_(channel_cache),
+      rdma_adapter_(rdma_adapter) {
   // hardcoded to default session (legacy_session_)
   // TODO: use WorkerSessionForSession
   // need to pass in session handle
@@ -264,7 +266,7 @@ void RdmaMgr::InitAllocators() {
       flag, [this]() { RdmaMemoryMgr::Singleton().pd_ = rdma_adapter_->pd_; });
 }
 
-void RdmaMgr::RegMemVisitors() {
+/*static*/ void RdmaMgr::RegMemVisitors(ibv_device* device) {
   SubAllocator::Visitor alloc_visitor = [](void* ptr, int numa_node,
                                            size_t num_bytes) {
     RdmaMemoryMgr::Singleton().InsertMemoryRegion(
@@ -281,7 +283,7 @@ void RdmaMgr::RegMemVisitors() {
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   if (IsGDRAvailable()) {
     // Note we don't free allocated GPU memory so there is no free visitor
-    int32_t bus_id = TryToReadNumaNode(rdma_adapter_->context_->device) + 1;
+    int32_t bus_id = TryToReadNumaNode(device) + 1;
 
     SubAllocator::Visitor cuda_alloc_visitor = [](void* ptr, int gpu_id,
                                                   size_t num_bytes) {

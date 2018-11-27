@@ -82,20 +82,21 @@ std::once_flag reg_mem_visitors_call;
 
 Status VerbsServer::Init(ServiceInitFunction service_func,
                          RendezvousMgrCreationFunction rendezvous_mgr_func) {
+  RdmaAdapter *rdma_adapter = new RdmaAdapter(worker_env());
+  std::call_once(reg_mem_visitors_call, [rdma_adapter]() {
+    RdmaMgr::RegMemVisitors(rdma_adapter->GetDevice());
+  });
   Status s = GrpcServer::Init(service_func, rendezvous_mgr_func);
   {
     mutex_lock l(mu_);
     CHECK_EQ(verbs_state_, DISCONNECTED);
     CHECK(ChannelCacheFactory(server_def(), &channel_cache_).ok());
-    rdma_mgr_ = new RdmaMgr(worker_env(), channel_cache_);
+    rdma_mgr_ = new RdmaMgr(worker_env(), channel_cache_, rdma_adapter);
     // set rdma_mgr for verbs_service and rdma_rendezvous_mgr
     verbs_service_->SetRdmaMgr(rdma_mgr_);
     dynamic_cast<RdmaRendezvousMgr*>(worker_env()->rendezvous_mgr)
         ->SetRdmaMgr(rdma_mgr_);
   }
-  std::call_once(reg_mem_visitors_call, [this]() {
-    rdma_mgr_->RegMemVisitors();
-  });
   return s;
 }
 
