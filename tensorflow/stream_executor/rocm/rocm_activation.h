@@ -34,7 +34,7 @@ namespace rocm {
 class ROCMExecutor;
 class ScopedActivateContext;
 
-// Activates a ROCM device within an enclosing scope.
+// Activates a ROCM context within an enclosing scope.
 class ScopedActivateExecutorContext {
  public:
   // Form that takes a ROCM executor implementation.
@@ -43,6 +43,8 @@ class ScopedActivateExecutorContext {
   // Form that takes a pImpl executor and extracts a ROCM implementation --
   // fatal failure if it is not ROCM inside.
   explicit ScopedActivateExecutorContext(StreamExecutor* stream_exec);
+
+  ScopedActivateExecutorContext(ScopedActivateExecutorContext&& other);
 
   ~ScopedActivateExecutorContext();
 

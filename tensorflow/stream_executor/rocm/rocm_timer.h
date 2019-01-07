@@ -29,7 +29,7 @@ namespace rocm {
 class ROCMExecutor;
 class ROCMStream;
 
-// Wraps a pair of hipEvent_ts in order to satisfy the platform-independent
+// Wraps a pair of HUevents in order to satisfy the platform-independent
 // TimerInferface -- both a start and a stop event are present which may be
 // recorded in a stream.
 class ROCMTimer : public internal::TimerInterface {
@@ -37,8 +37,9 @@ class ROCMTimer : public internal::TimerInterface {
   explicit ROCMTimer(ROCMExecutor *parent)
       : parent_(parent), start_event_(nullptr), stop_event_(nullptr) {}
 
-  // Note: teardown is explicitly handled in this API by a call to
+  // Note: teardown needs to be explicitly handled in this API by a call to
   // StreamExecutor::DeallocateTimer(), which invokes Destroy().
+  // TODO(csigg): Change to RAII.
   ~ROCMTimer() override {}
 
   // Allocates the platform-specific pieces of the timer, called as part of
@@ -70,10 +71,17 @@ class ROCMTimer : public internal::TimerInterface {
 
  private:
   ROCMExecutor *parent_;
-  hipEvent_t start_event_;  // Event recorded to indicate the "start" timestamp
+  HUevent start_event_;  // Event recorded to indicate the "start" timestamp
                          // executing in a stream.
-  hipEvent_t stop_event_;   // Event recorded to indicate the "stop" timestamp
+  HUevent stop_event_;   // Event recorded to indicate the "stop" timestamp
                          // executing in a stream.
+};
+
+struct TimerDeleter {
+  void operator()(ROCMTimer *t) {
+    t->Destroy();
+    delete t;
+  }
 };
 
 }  // namespace rocm

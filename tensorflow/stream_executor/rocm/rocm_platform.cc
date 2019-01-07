@@ -88,9 +88,9 @@ port::StatusOr<StreamExecutor*> ROCmPlatform::FirstExecutorForBus(
     }
   }
 
-  return port::Status{
+  return port::Status(
       port::error::NOT_FOUND,
-      port::Printf("Executor for bus %d not found.", bus_ordinal)};
+      port::Printf("Executor for bus %d not found.", bus_ordinal));
 }
 
 Platform::Id ROCmPlatform::id() const { return kROCmPlatformId; }
@@ -137,11 +137,11 @@ ROCmPlatform::GetUncachedExecutor(const StreamExecutorConfig& config) {
       this, MakeUnique<ROCMExecutor>(config.plugin_config));
   auto init_status = executor->Init(config.ordinal, config.device_options);
   if (!init_status.ok()) {
-    return port::Status{
+    return port::Status(
         port::error::INTERNAL,
         port::Printf(
             "failed initializing StreamExecutor for ROCM device ordinal %d: %s",
-            config.ordinal, init_status.ToString().c_str())};
+            config.ordinal, init_status.ToString().c_str()));
   }
 
   return std::move(executor);

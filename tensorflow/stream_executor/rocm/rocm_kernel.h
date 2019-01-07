@@ -42,7 +42,7 @@ limitations under the License.
 namespace stream_executor {
 namespace rocm {
 
-// Wraps a hipFunction_t to implement the platform-independent KernelInterface.
+// Wraps a HUfunction to implement the platform-independent KernelInterface.
 class ROCMKernel : public internal::KernelInterface {
  public:
   ROCMKernel() : rocm_function_(nullptr), arity_(0),
@@ -57,17 +57,17 @@ class ROCMKernel : public internal::KernelInterface {
   void set_arity(unsigned arity) { arity_ = arity; }
   unsigned Arity() const override { return arity_; }
 
-  // Returns the hipFunction_t value for passing to the ROCM API.
-  hipFunction_t AsROCMFunctionValue() const {
+  // Returns the HUfunction value for passing to the ROCM API.
+  HUfunction AsROCMFunctionValue() const {
     DCHECK(rocm_function_ != nullptr);
-    return const_cast<hipFunction_t>(rocm_function_);
+    return const_cast<HUfunction>(rocm_function_);
   }
 
-  // Returns the slot that the hipFunction_t is stored within for this object,
-  // for the ROCM API which wants to load into a hipFunction_t*.
-  hipFunction_t *rocm_function_ptr() { return &rocm_function_; }
+  // Returns the slot that the HUfunction is stored within for this object,
+  // for the ROCM API which wants to load into a HUfunction*.
+  HUfunction *rocm_function_ptr() { return &rocm_function_; }
 
-  // ROCM supports setting the preferred cache configuration of a hipFunction_t
+  // ROCM supports setting the preferred cache configuration of a HUfunction
   // (more-or-less equivalent to a ROCMKernel). We support this via the below
   // functions; users can set a preference, and that is applied when the kernel
   // is [lazy-]loaded (in ROCMExecutor::Launch). The alternative would be to
@@ -84,17 +84,17 @@ class ROCMKernel : public internal::KernelInterface {
   }
 
   // Returns the current kernel cache configuration preference as a
-  // hipFuncCache_t.
-  hipFuncCache_t GetROCMCacheConfig() const {
+  // HUfunc_cache.
+  HUfunc_cache GetROCMCacheConfig() const {
     switch (preferred_cache_config_) {
       case KernelCacheConfig::kNoPreference:
-        return hipFuncCachePreferNone;
+        return HU_FUNC_CACHE_PREFER_NONE;
       case KernelCacheConfig::kPreferShared:
-        return hipFuncCachePreferShared;;
+        return HU_FUNC_CACHE_PREFER_SHARED;
       case KernelCacheConfig::kPreferL1:
-        return hipFuncCachePreferL1;;
+        return HU_FUNC_CACHE_PREFER_L1;
       case KernelCacheConfig::kPreferEqual:
-        return hipFuncCachePreferEqual;
+        return HU_FUNC_CACHE_PREFER_EQUAL;
       default:
         LOG(FATAL) << "Unknown KernelCacheConfig"
                    << static_cast<int32>(preferred_cache_config_);
@@ -102,7 +102,7 @@ class ROCMKernel : public internal::KernelInterface {
   }
 
  private:
-  hipFunction_t rocm_function_;  // Wrapped ROCM kernel handle.
+  HUfunction rocm_function_;  // Wrapped ROCM kernel handle.
   unsigned arity_;            // Number of formal parameters the kernel takes.
 
   // Preferred (but not required) cache configuration for this kernel.

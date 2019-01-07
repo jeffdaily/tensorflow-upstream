@@ -28,7 +28,7 @@ namespace rocm {
 
 class ROCMExecutor;
 
-// Wraps a hipStream_t in order to satisfy the platform-independent
+// Wraps a HUstream in order to satisfy the platform-independent
 // StreamInterface.
 //
 // Thread-safe post-initialization.
@@ -59,33 +59,33 @@ class ROCMStream : public internal::StreamInterface {
   // Retrieves an event which indicates that all work enqueued into the stream
   // has completed. Ownership of the event is not transferred to the caller, the
   // event is owned by this stream.
-  hipEvent_t* completed_event() { return &completed_event_; }
+  HUevent* completed_event() { return &completed_event_; }
 
-  // Returns the hipStream_t value for passing to the ROCM API.
+  // Returns the HUstream value for passing to the ROCM API.
   //
   // Precond: this ROCMStream has been allocated (otherwise passing a nullptr
   // into ROCM library causes difficult-to-understand faults).
-  hipStream_t rocm_stream() const {
+  HUstream rocm_stream() const {
     DCHECK(rocm_stream_ != nullptr);
-    return const_cast<hipStream_t>(rocm_stream_);
+    return const_cast<HUstream>(rocm_stream_);
   }
 
   ROCMExecutor *parent() const { return parent_; }
 
  private:
   ROCMExecutor *parent_;  // Executor that spawned this stream.
-  hipStream_t rocm_stream_;  // Wrapped ROCM stream handle.
+  HUstream rocm_stream_;  // Wrapped ROCM stream handle.
 
   // Event that indicates this stream has completed.
-  hipEvent_t completed_event_ = nullptr;
+  HUevent completed_event_ = nullptr;
 };
 
 // Helper functions to simplify extremely common flows.
 // Converts a Stream to the underlying ROCMStream implementation.
 ROCMStream *AsROCMStream(Stream *stream);
 
-// Extracts a hipStream_t from a ROCMStream-backed Stream object.
-hipStream_t AsROCMStreamValue(Stream *stream);
+// Extracts a HUstream from a ROCMStream-backed Stream object.
+HUstream AsROCMStreamValue(Stream *stream);
 
 }  // namespace rocm
 }  // namespace stream_executor

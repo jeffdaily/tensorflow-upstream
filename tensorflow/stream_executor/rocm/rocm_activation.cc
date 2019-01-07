@@ -22,13 +22,13 @@ limitations under the License.
 namespace stream_executor {
 namespace rocm {
 
-int ExtractROCmDeviceOrdinal(ROCMExecutor *rocm_exec);
+RocmContext* ExtractRocmContext(ROCMExecutor *rocm_exec);
 ROCMExecutor *ExtractROCmExecutor(StreamExecutor *stream_exec);
 
 ScopedActivateExecutorContext::ScopedActivateExecutorContext(
     ROCMExecutor *rocm_exec):
       driver_scoped_activate_context_(
-          new ScopedActivateContext{ExtractROCmDeviceOrdinal(rocm_exec)}) { }
+          new ScopedActivateContext{ExtractRocmContext(rocm_exec)}) { }
 
 ScopedActivateExecutorContext::ScopedActivateExecutorContext(
     StreamExecutor *stream_exec)
@@ -36,6 +36,12 @@ ScopedActivateExecutorContext::ScopedActivateExecutorContext(
 
 ScopedActivateExecutorContext::~ScopedActivateExecutorContext() {
   delete static_cast<ScopedActivateContext *>(driver_scoped_activate_context_);
+}
+
+ScopedActivateExecutorContext::ScopedActivateExecutorContext(
+    ScopedActivateExecutorContext &&other)
+    : driver_scoped_activate_context_(other.driver_scoped_activate_context_) {
+  other.driver_scoped_activate_context_ = nullptr;
 }
 
 }  // namespace rocm

@@ -24,7 +24,9 @@ limitations under the License.
 
 #include <map>
 #include <set>
+#include <unordered_map>
 
+#include "absl/strings/string_view.h"
 #include "tensorflow/stream_executor/rocm/rocm_kernel.h"
 #include "tensorflow/stream_executor/event.h"
 #include "tensorflow/stream_executor/lib/status.h"
@@ -46,6 +48,7 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
   // be a ROCM type.
   explicit ROCMExecutor(const PluginConfig &plugin_config)
       : device_(0),
+        context_(nullptr),
         device_ordinal_(0),
         version_(0),
         plugin_config_(plugin_config) {}
@@ -60,8 +63,8 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
   bool GetKernel(const MultiKernelLoaderSpec &spec,
                  KernelBase *kernel) override;
 
-  bool LoadModule(const MultiModuleLoaderSpec& spec,
-                  ModuleHandle* module_handle) override;
+  bool LoadModule(const MultiModuleLoaderSpec &spec,
+                  ModuleHandle *module_handle) override;
 
   bool UnloadModule(ModuleHandle module_handle) override;
   bool UnloadGpuBinary(const void* gpu_binary)
@@ -83,11 +86,11 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
   // There's no external interface for us to otherwise control these DMA
   // settings.
   void *HostMemoryAllocate(uint64 size) override {
-    return ROCMDriver::HostAllocate(device_ordinal_, size);
+    return ROCMDriver::HostAllocate(context_, size);
   }
 
   void HostMemoryDeallocate(void *location) override {
-    return ROCMDriver::HostDeallocate(device_ordinal_, location);
+    return ROCMDriver::HostDeallocate(context_, location);
   }
 
   bool HostMemoryRegister(void *location, uint64 size) override;
@@ -129,7 +132,7 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
                             const DeviceMemoryBase &gpu_src,
                             uint64 size) override;
 
-  bool HostCallback(Stream* stream,
+  bool HostCallback(Stream *stream,
                     std::function<port::Status()> callback) override;
 
   bool AllocateStream(Stream *stream) override;
@@ -172,7 +175,8 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
 
   // Search for the symbol and returns a device pointer and size.
   // Returns false if symbol does not exist.
-  bool GetSymbol(const string& symbol_name, ModuleHandle module_handle, void **mem, size_t *bytes) override;
+  bool GetSymbol(const string &symbol_name, ModuleHandle module_handle,
+                 void **mem, size_t *bytes) override;
 
   DeviceDescription *PopulateDeviceDescription() const override;
 
@@ -209,8 +213,8 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
 
   void *GpuContextHack() override;
 
-  int device_ordinal() const { return device_ordinal_; }
-  
+  RocmContext* rocm_context();
+
  private:
   // Attempts to find a more specific version of the file indicated by
   // filename by looking for AMDGPU ISA-specific suffixed versions.
@@ -222,7 +226,7 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
   // data: User-provided callback provided to HostCallback() above, captured
   //       as a std::function<void()>. Allocated/initialized inside
   //       HostCallback() and owned and deleted by this call.
-  static void InternalHostCallback(hipStream_t stream, hipError_t status,
+  static void InternalHostCallback(HUstream stream, HUresult status,
                                    void *data);
 
   // Collects metadata for the specified kernel.
@@ -234,7 +238,7 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
   void VlogOccupancyInfo(const KernelBase &kernel, const ThreadDim &thread_dims,
                          const BlockDim &block_dims);
 
-  bool LoadModuleFromHsaco(const char* hsaco, hipModule_t* module)
+  bool LoadModuleFromHsaco(const char *hsaco, HUmodule *module)
       EXCLUSIVE_LOCKS_REQUIRED(in_memory_modules_mu_);
 
   // Guards the on-disk-module mapping.
@@ -260,11 +264,14 @@ class ROCMExecutor : public internal::StreamExecutorInterface {
 
   // Keeps track of the set of launched kernels. Currently used to suppress the
   // occupancy check on subsequent launches.
-  std::set<hipFunction_t> launched_kernels_ GUARDED_BY(launched_kernels_mu_);
+  std::set<HUfunction> launched_kernels_ GUARDED_BY(launched_kernels_mu_);
 
   // Handle for the ROCM device being operated on. Immutable
   // post-initialization.
-  hipDevice_t device_;
+  HUdevice device_;
+
+  // Handle for session with the library/driver. Immutable post-initialization.
+  RocmContext* context_;
 
   // The device ordinal value that this executor was initialized with; recorded
   // for use in getting device metadata. Immutable post-initialization.

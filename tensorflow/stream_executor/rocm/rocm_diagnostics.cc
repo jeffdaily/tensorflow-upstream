@@ -38,7 +38,6 @@ limitations under the License.
 #include "tensorflow/stream_executor/lib/stringprintf.h"
 #include "tensorflow/stream_executor/platform/logging.h"
 #include "tensorflow/stream_executor/lib/numbers.h"
-#include "tensorflow/stream_executor/lib/str_util.h"
 
 namespace stream_executor {
 namespace rocm {
@@ -68,25 +67,25 @@ port::StatusOr<DriverVersion> StringToDriverVersion(const string &value) {
   int minor;
   int patch = 0;
   if (!port::safe_strto32(pieces[0], &major)) {
-    return port::Status{
+    return port::Status(
         port::error::INVALID_ARGUMENT,
         port::Printf("could not parse major version number \"%s\" as an "
                      "integer from string \"%s\"",
-                     pieces[0].c_str(), value.c_str())};
+                     pieces[0].c_str(), value.c_str()));
   }
   if (!port::safe_strto32(pieces[1], &minor)) {
-    return port::Status{
+    return port::Status(
         port::error::INVALID_ARGUMENT,
         port::Printf("could not parse minor version number \"%s\" as an "
                      "integer from string \"%s\"",
-                     pieces[1].c_str(), value.c_str())};
+                     pieces[1].c_str(), value.c_str()));
   }
   if (pieces.size() == 3 && !port::safe_strto32(pieces[2], &patch)) {
-    return port::Status{
-      port::error::INVALID_ARGUMENT,
-      port::Printf("could not parse patch version number \"%s\" as an "
+    return port::Status(
+        port::error::INVALID_ARGUMENT,
+        port::Printf("could not parse patch version number \"%s\" as an "
                      "integer from string \"%s\"",
-                   pieces[2].c_str(), value.c_str())};
+                     pieces[2].c_str(), value.c_str()));
   }
 
   DriverVersion result{major, minor, patch};
@@ -147,9 +146,9 @@ void Diagnostician::LogDiagnosticInformation() {
 // Iterates through loaded DSOs with DlIteratePhdrCallback to find the
 // driver-interfacing DSO version number. Returns it as a string.
 port::StatusOr<DriverVersion> Diagnostician::FindDsoVersion() {
-  port::StatusOr<DriverVersion> result{port::Status{
+  port::StatusOr<DriverVersion> result(port::Status(
       port::error::NOT_FOUND,
-      "was unable to find librocm.so DSO loaded into this program"}};
+      "was unable to find librocm.so DSO loaded into this program"));
 
   // Callback used when iterating through DSOs. Looks for the driver-interfacing
   // DSO and yields its version number into the callback data, when found.
@@ -191,11 +190,11 @@ port::StatusOr<DriverVersion> Diagnostician::FindKernelModuleVersion(
   static const char *kDriverFilePrelude = "Kernel Module  ";
   size_t offset = driver_version_file_contents.find(kDriverFilePrelude);
   if (offset == string::npos) {
-    return port::Status{
+    return port::Status(
         port::error::NOT_FOUND,
         absl::StrCat("could not find kernel module information in "
                      "driver version file contents: \"",
-                     driver_version_file_contents, "\"")};
+                     driver_version_file_contents, "\""));
   }
 
   string version_and_rest = driver_version_file_contents.substr(
@@ -227,9 +226,9 @@ void Diagnostician::WarnOnDsoKernelMismatch(
 
 port::StatusOr<DriverVersion> Diagnostician::FindKernelDriverVersion() {
   auto status =
-    port::Status{port::error::UNIMPLEMENTED,
+    port::Status(port::error::UNIMPLEMENTED,
                  "kernel reported driver version not implemented"
-    };
+    );
   return status;
 }
 

@@ -16,20 +16,20 @@ limitations under the License.
 #include "tensorflow/stream_executor/rocm/rocm_gpu_executor.h"
 
 #include <unistd.h>
-#include "absl/base/casts.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/stream_executor/rocm/rocm_diagnostics.h"
 #include "tensorflow/stream_executor/rocm/rocm_driver.h"
 #include "tensorflow/stream_executor/rocm/rocm_event.h"
 #include "tensorflow/stream_executor/rocm/rocm_platform_id.h"
 #include "tensorflow/stream_executor/rocm/rocm_stream.h"
 #include "tensorflow/stream_executor/rocm/rocm_timer.h"
-#include "tensorflow/stream_executor/dso_loader.h"
 #include "tensorflow/stream_executor/kernel_cache_config.h"
 #include "tensorflow/stream_executor/lib/env.h"
 #include "tensorflow/stream_executor/lib/error.h"
 #include "tensorflow/stream_executor/lib/initialize.h"
 #include "tensorflow/stream_executor/lib/mathutil.h"
+#include "tensorflow/stream_executor/lib/numbers.h"
 #include "tensorflow/stream_executor/lib/path.h"
 #include "tensorflow/stream_executor/lib/process_state.h"
 #include "tensorflow/stream_executor/lib/ptr_util.h"
@@ -44,7 +44,6 @@ limitations under the License.
 #include "tensorflow/stream_executor/stream_executor_internal.h"
 #include "tensorflow/stream_executor/stream_executor_pimpl.h"
 #include "tensorflow/stream_executor/timer.h"
-#include "tensorflow/stream_executor/lib/numbers.h"
 
 #ifdef PLATFORMS_GPUS_ROCM_DYNAMIC_LIBROCM_DYNAMIC_LIBROCM_H_
 #error \
@@ -78,23 +77,18 @@ static ROCMTimer *AsROCMTimer(Timer *timer) {
 // N.B. we must lose constness in order to pass a suitable type to the existing
 // librocm APIs, so the caller should take care to only pass the result of const
 // GPU memory conversions to librocm functions which will honor constness.
-static hipDeviceptr_t AsROCmDevicePtr(const DeviceMemoryBase &gpu_mem) {
-  return const_cast<hipDeviceptr_t>(gpu_mem.opaque());
+static HUdeviceptr AsROCmDevicePtr(const DeviceMemoryBase &gpu_mem) {
+  return const_cast<HUdeviceptr>(gpu_mem.opaque());
 }
 
 // See description on const version above.
-static hipDeviceptr_t AsROCmDevicePtr(DeviceMemoryBase *gpu_mem) {
+static HUdeviceptr AsROCmDevicePtr(DeviceMemoryBase *gpu_mem) {
   return AsROCmDevicePtr(*gpu_mem);
 }
 
-static int GetROCmDeviceOrdinal(Stream *stream) {
-  return static_cast<ROCMExecutor *>(stream->parent()->implementation())
-    ->device_ordinal();
-}
-
-int ExtractROCmDeviceOrdinal(ROCMExecutor *rocm_exec) {
+RocmContext* ExtractRocmContext(ROCMExecutor *rocm_exec) {
   CHECK(rocm_exec != nullptr);
-  return rocm_exec->device_ordinal();
+  return rocm_exec->rocm_context();
 }
 
 ROCMExecutor *ExtractROCmExecutor(StreamExecutor *stream_exec) {
@@ -103,12 +97,15 @@ ROCMExecutor *ExtractROCmExecutor(StreamExecutor *stream_exec) {
 
 ROCMExecutor::~ROCMExecutor() {
   for (auto &it : disk_modules_) {
-    ROCMDriver::UnloadModule(device_ordinal_, it.second);
+    ROCMDriver::UnloadModule(context_, it.second);
   }
   for (auto &it : in_memory_modules_) {
-    ROCMDriver::UnloadModule(device_ordinal_, it.second);
+    ROCMDriver::UnloadModule(context_, it.second);
   }
   CHECK(gpu_binary_to_module_.empty()) << "ROCMExecutor has loaded modules.";
+  if (context_ != nullptr) {
+    ROCMDriver::DestroyContext(context_);
+  }
 }
 bool ROCMExecutor::UnloadModule(ModuleHandle module_handle) {
   const char* gpu_binary = reinterpret_cast<const char*>(module_handle.id());
@@ -127,7 +124,7 @@ bool ROCMExecutor::UnloadGpuBinary(const void* gpu_binary) {
   VLOG(3) << "Found HSACO module " << module << " with refcount " << refcount;
   if (--refcount == 0) {
     VLOG(3) << "Unloading  HSACO module " << module;
-    ROCMDriver::UnloadModule(device_ordinal_, module);
+    ROCMDriver::UnloadModule(context_, module);
     gpu_binary_to_module_.erase(module_it);
   }
   return true;
@@ -143,6 +140,11 @@ port::Status ROCMExecutor::Init(int device_ordinal,
   }
 
   status = ROCMDriver::GetDevice(device_ordinal_, &device_);
+  if (!status.ok()) {
+    return status;
+  }
+
+  status = ROCMDriver::CreateContext(device_, device_options, &context_);
   if (!status.ok()) {
     return status;
   }
@@ -220,7 +222,7 @@ bool ROCMExecutor::GetKernel(const MultiKernelLoaderSpec &spec,
     module = in_memory_modules_[hsaco];
 
     if (module == nullptr) {
-      if (!ROCMDriver::LoadHsaco(device_ordinal_, hsaco, &module)) {
+      if (!ROCMDriver::LoadHsaco(context_, hsaco, &module)) {
         LOG(ERROR) << "failed to load HSACO\n";
         return false;
       }
@@ -232,7 +234,7 @@ bool ROCMExecutor::GetKernel(const MultiKernelLoaderSpec &spec,
   }
 
   VLOG(2) << "getting function " << *kernelname << " from module " << module;
-  if (!ROCMDriver::GetModuleFunction(device_ordinal_, module, kernelname->c_str(),
+  if (!ROCMDriver::GetModuleFunction(context_, module, kernelname->c_str(),
                                      rocm_kernel->rocm_function_ptr())) {
     return false;
   }
@@ -243,7 +245,7 @@ bool ROCMExecutor::GetKernel(const MultiKernelLoaderSpec &spec,
 
   KernelMetadata kernel_metadata;
   if (!GetKernelMetadata(rocm_kernel, &kernel_metadata)) {
-    LOG(WARNING) << "Unable to get metadata for kernel " << kernelname;
+    LOG(WARNING) << "unable to get metadata for kernel " << *kernelname;
   }
   kernel->set_metadata(kernel_metadata);
   kernel->set_name(*kernelname);
@@ -253,10 +255,18 @@ bool ROCMExecutor::GetKernel(const MultiKernelLoaderSpec &spec,
 bool ROCMExecutor::GetKernelMetadata(ROCMKernel *rocm_kernel,
                                      KernelMetadata *kernel_metadata) {
   int value = 0;
-  // ROCM TODO implement this feature in HIP
+  if (!ROCMDriver::FuncGetAttribute(HU_FUNC_ATTRIBUTE_NUM_REGS,
+                                    *rocm_kernel->rocm_function_ptr(),
+                                    &value)) {
+    return false;
+  }
   kernel_metadata->set_registers_per_thread(value);
 
-  // ROCM TODO implement this feature in HIP
+  if (!ROCMDriver::FuncGetAttribute(HU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                                    *rocm_kernel->rocm_function_ptr(),
+                                    &value)) {
+    return false;
+  }
   kernel_metadata->set_shared_memory_bytes(value);
 
   return true;
@@ -266,26 +276,26 @@ bool ROCMExecutor::Launch(Stream *stream, const ThreadDim &thread_dims,
                           const BlockDim &block_dims, const KernelBase &kernel,
                           const KernelArgsArrayBase &args) {
   CHECK_EQ(kernel.Arity(), args.number_of_arguments());
-  hipStream_t hipstream = AsROCMStreamValue(stream);
+  HUstream hustream = AsROCMStreamValue(stream);
   const ROCMKernel *rocm_kernel = AsROCMKernel(&kernel);
-  hipFunction_t hipfunc = rocm_kernel->AsROCMFunctionValue();
+  HUfunction hufunc = rocm_kernel->AsROCMFunctionValue();
 
   // Only perform/print the occupancy check once.  Even just checking to see
   // whether we've done an occupancy check on this kernel before isn't free
   // (because we have to synchronize), so we only do this at -v 2+.
   if (VLOG_IS_ON(2)) {
     mutex_lock lock(launched_kernels_mu_);
-    if (!launched_kernels_.count(hipfunc)) {
+    if (!launched_kernels_.count(hufunc)) {
       VlogOccupancyInfo(kernel, thread_dims, block_dims);
       // TODO(rspringer): Remove elements from launched_kernels_...if we ever
       // expose a kernel/module deallocation method.
-      launched_kernels_.insert(hipfunc);
+      launched_kernels_.insert(hufunc);
     }
   }
 
   if (rocm_kernel->GetPreferredCacheConfig() !=
       KernelCacheConfig::kNoPreference) {
-    ROCMDriver::FuncSetCacheConfig(hipfunc, rocm_kernel->GetROCMCacheConfig());
+    ROCMDriver::FuncSetCacheConfig(hufunc, rocm_kernel->GetROCMCacheConfig());
   }
 
   // prepare kernargs
@@ -306,14 +316,14 @@ bool ROCMExecutor::Launch(Stream *stream, const ThreadDim &thread_dims,
     HIP_LAUNCH_PARAM_END
   };
 
-  if (!ROCMDriver::LaunchKernel(GetROCmDeviceOrdinal(stream), hipfunc, block_dims.x,
-                                block_dims.y, block_dims.z, thread_dims.x,
-                                thread_dims.y, thread_dims.z,
-                                args.number_of_shared_bytes(), hipstream,
-                                nullptr, (void**)&config)) {
-    LOG(ERROR) << "failed to launch ROCM kernel with args: "
+  if (!ROCMDriver::LaunchKernel(context_, hufunc, block_dims.x, block_dims.y,
+                                block_dims.z, thread_dims.x, thread_dims.y,
+                                thread_dims.z, args.number_of_shared_bytes(),
+                                hustream, (void**)&config,
+                                nullptr /* = extra */)) {
+    LOG(ERROR) << "failed to launch ROCM kernel " << kernel.name() << " with "
                << args.number_of_arguments()
-               << "; thread dim: " << thread_dims.ToString()
+               << " args; thread dim: " << thread_dims.ToString()
                << "; block dim: " << block_dims.ToString();
     return false;
   }
@@ -347,7 +357,7 @@ bool ROCMExecutor::LoadModuleFromHsaco(const char* hsaco, hipModule_t* module) {
   std::tie(*module, module_refcount) = gpu_binary_to_module_[hsaco];
 
   if (*module == nullptr) {
-    if (!ROCMDriver::LoadHsaco(device_ordinal_, hsaco, module)) {
+    if (!ROCMDriver::LoadHsaco(context_, hsaco, module)) {
       LOG(ERROR) << "failed to load : HSACO \n";
       return false;
     }
@@ -373,7 +383,7 @@ void ROCMExecutor::VlogOccupancyInfo(const KernelBase &kernel,
 }
 
 void *ROCMExecutor::Allocate(uint64 size) {
-  return ROCMDriver::DeviceAllocate(device_ordinal_, size);
+  return ROCMDriver::DeviceAllocate(context_, size);
 }
 
 void *ROCMExecutor::AllocateSubBuffer(DeviceMemoryBase *mem,
@@ -385,7 +395,7 @@ void *ROCMExecutor::AllocateSubBuffer(DeviceMemoryBase *mem,
 void ROCMExecutor::Deallocate(DeviceMemoryBase *mem) {
   // ROCM "sub-buffers" are just pointer + offset, so no dealloc is necessary.
   if (!mem->is_sub_buffer()) {
-    ROCMDriver::DeviceDeallocate(device_ordinal_, mem->opaque());
+    ROCMDriver::DeviceDeallocate(context_, mem->opaque());
   }
 }
 
@@ -395,25 +405,25 @@ bool ROCMExecutor::HostMemoryRegister(void *location, uint64 size) {
                  << location << "; size " << size;
   }
   VLOG(2) << "registering " << location << " size " << size;
-  return ROCMDriver::HostRegister(device_ordinal_, location, size);
+  return ROCMDriver::HostRegister(context_, location, size);
 }
 
 bool ROCMExecutor::HostMemoryUnregister(void *location) {
   VLOG(2) << "unregistering " << location;
-  return ROCMDriver::HostUnregister(device_ordinal_, location);
+  return ROCMDriver::HostUnregister(context_, location);
 }
 
 bool ROCMExecutor::SynchronizeAllActivity() {
-  return ROCMDriver::SynchronizeDevice(device_ordinal_);
+  return ROCMDriver::SynchronizeContext(context_);
 }
 
 bool ROCMExecutor::SynchronousMemZero(DeviceMemoryBase *location, uint64 size) {
   if (reinterpret_cast<uintptr_t>(location->opaque()) % 4 == 0 &&
       size % 4 == 0) {
     return ROCMDriver::SynchronousMemsetUint32(
-        device_ordinal_, AsROCmDevicePtr(location), 0x0, size / 4);
+        context_, AsROCmDevicePtr(location), 0x0, size / 4);
   }
-  return ROCMDriver::SynchronousMemsetUint8(device_ordinal_, AsROCmDevicePtr(location),
+  return ROCMDriver::SynchronousMemsetUint8(context_, AsROCmDevicePtr(location),
                                             0x0, size);
 }
 
@@ -421,34 +431,34 @@ bool ROCMExecutor::SynchronousMemSet(DeviceMemoryBase *location, int value,
                                      uint64 size) {
   if (reinterpret_cast<uintptr_t>(location->opaque()) % 4 == 0 &&
       size % 4 == 0) {
-    // hipMemset reinterprets "value" as a uint8.
+    // huMemset reinterprets "value" as a uint8.
     uint8 byte_value = static_cast<uint8>(value);
     uint32 pattern = (byte_value << 24) | (byte_value << 16) |
                      (byte_value << 8) | byte_value;
     return ROCMDriver::SynchronousMemsetUint32(
-        device_ordinal_, AsROCmDevicePtr(location), pattern, size / 4);
+        context_, AsROCmDevicePtr(location), pattern, size / 4);
   }
-  return ROCMDriver::SynchronousMemsetUint8(device_ordinal_, AsROCmDevicePtr(location),
+  return ROCMDriver::SynchronousMemsetUint8(context_, AsROCmDevicePtr(location),
                                             value, size);
 }
 
 port::Status ROCMExecutor::SynchronousMemcpy(DeviceMemoryBase *gpu_dst,
                                              const void *host_src,
                                              uint64 size) {
-  return ROCMDriver::SynchronousMemcpyH2D(device_ordinal_, AsROCmDevicePtr(gpu_dst),
+  return ROCMDriver::SynchronousMemcpyH2D(context_, AsROCmDevicePtr(gpu_dst),
                                           host_src, size);
 }
 
 port::Status ROCMExecutor::SynchronousMemcpy(void *host_dst,
                                              const DeviceMemoryBase &gpu_src,
                                              uint64 size) {
-  return ROCMDriver::SynchronousMemcpyD2H(device_ordinal_, host_dst,
+  return ROCMDriver::SynchronousMemcpyD2H(context_, host_dst,
                                           AsROCmDevicePtr(gpu_src), size);
 }
 
 port::Status ROCMExecutor::SynchronousMemcpyDeviceToDevice(
     DeviceMemoryBase *gpu_dst, const DeviceMemoryBase &gpu_src, uint64 size) {
-  return ROCMDriver::SynchronousMemcpyD2D(device_ordinal_, AsROCmDevicePtr(gpu_dst),
+  return ROCMDriver::SynchronousMemcpyD2D(context_, AsROCmDevicePtr(gpu_dst),
                                           AsROCmDevicePtr(gpu_src), size);
 }
 
@@ -468,7 +478,7 @@ bool ROCMExecutor::Memset(Stream *stream, DeviceMemoryBase *location,
           << " at location " << location << " with size " << size
           << " and pattern " << std::hex << pattern;
   return ROCMDriver::AsynchronousMemsetUint8(
-      device_ordinal_, AsROCmDevicePtr(location), pattern, size,
+      context_, AsROCmDevicePtr(location), pattern, size,
       AsROCMStreamValue(stream));
 }
 
@@ -480,20 +490,20 @@ bool ROCMExecutor::Memset32(Stream *stream, DeviceMemoryBase *location,
   CHECK(reinterpret_cast<uintptr_t>(location->opaque()) % 4 == 0 &&
         size % 4 == 0);
   return ROCMDriver::AsynchronousMemsetUint32(
-      device_ordinal_, AsROCmDevicePtr(location), pattern, size / 4,
+      context_, AsROCmDevicePtr(location), pattern, size / 4,
       AsROCMStreamValue(stream));
 }
 
 bool ROCMExecutor::Memcpy(Stream *stream, void *host_dst,
                           const DeviceMemoryBase &gpu_src, uint64 size) {
-  return ROCMDriver::AsynchronousMemcpyD2H(device_ordinal_, host_dst,
+  return ROCMDriver::AsynchronousMemcpyD2H(context_, host_dst,
                                            AsROCmDevicePtr(gpu_src), size,
                                            AsROCMStreamValue(stream));
 }
 
 bool ROCMExecutor::Memcpy(Stream *stream, DeviceMemoryBase *gpu_dst,
                           const void *host_src, uint64 size) {
-  return ROCMDriver::AsynchronousMemcpyH2D(device_ordinal_, AsROCmDevicePtr(gpu_dst),
+  return ROCMDriver::AsynchronousMemcpyH2D(context_, AsROCmDevicePtr(gpu_dst),
                                            host_src, size,
                                            AsROCMStreamValue(stream));
 }
@@ -502,12 +512,12 @@ bool ROCMExecutor::MemcpyDeviceToDevice(Stream *stream,
                                         DeviceMemoryBase *gpu_dst,
                                         const DeviceMemoryBase &gpu_src,
                                         uint64 size) {
-  return ROCMDriver::AsynchronousMemcpyD2D(device_ordinal_, AsROCmDevicePtr(gpu_dst),
+  return ROCMDriver::AsynchronousMemcpyD2D(context_, AsROCmDevicePtr(gpu_dst),
                                            AsROCmDevicePtr(gpu_src), size,
                                            AsROCMStreamValue(stream));
 }
 
-bool ROCMExecutor::HostCallback(Stream* stream,
+bool ROCMExecutor::HostCallback(Stream *stream,
                                 std::function<port::Status()> callback) {
   auto callback_ptr = new std::function<void()>([callback]() {
     port::Status s = callback();
@@ -515,12 +525,12 @@ bool ROCMExecutor::HostCallback(Stream* stream,
       LOG(WARNING) << "Host callback failed: " << s;
     }
   });
-  return ROCMDriver::AddStreamCallback(device_ordinal_, AsROCMStreamValue(stream),
+  return ROCMDriver::AddStreamCallback(context_, AsROCMStreamValue(stream),
                                        InternalHostCallback, callback_ptr);
 }
 
-/* static */ void ROCMExecutor::InternalHostCallback(hipStream_t stream,
-                                                     hipError_t status,
+/* static */ void ROCMExecutor::InternalHostCallback(HUstream stream,
+                                                     HUresult status,
                                                      void *data) {
   std::function<void()> *callback =
       reinterpret_cast<std::function<void()> *>(data);
@@ -541,15 +551,15 @@ port::Status ROCMExecutor::RecordEvent(Stream *stream, Event *event) {
 }
 
 port::Status ROCMExecutor::WaitForEvent(Stream *stream, Event *event) {
-  if (ROCMDriver::WaitStreamOnEvent(device_ordinal_,
+  if (ROCMDriver::WaitStreamOnEvent(context_,
                                     AsROCMStream(stream)->rocm_stream(),
                                     AsROCMEvent(event)->rocm_event())) {
     return port::Status::OK();
   } else {
-    return port::Status{
+    return port::Status(
         port::error::INTERNAL,
         port::Printf("error recording waiting for ROCM event on stream %p",
-                     stream)};
+                     stream));
   }
 }
 
@@ -578,8 +588,8 @@ void ROCMExecutor::DeallocateTimer(Timer *timer) {
 }
 
 bool ROCMExecutor::CreateStreamDependency(Stream *dependent, Stream *other) {
-  hipEvent_t other_completed_event = *AsROCMStream(other)->completed_event();
-  bool ok = ROCMDriver::RecordEvent(device_ordinal_, other_completed_event,
+  HUevent other_completed_event = *AsROCMStream(other)->completed_event();
+  bool ok = ROCMDriver::RecordEvent(context_, other_completed_event,
                                     AsROCMStreamValue(other))
       .ok();
   if (!ok) {
@@ -588,7 +598,7 @@ bool ROCMExecutor::CreateStreamDependency(Stream *dependent, Stream *other) {
     return false;
   }
 
-  return ROCMDriver::WaitStreamOnEvent(device_ordinal_, AsROCMStreamValue(dependent),
+  return ROCMDriver::WaitStreamOnEvent(context_, AsROCMStreamValue(dependent),
                                        other_completed_event);
 }
 
@@ -601,7 +611,7 @@ bool ROCMExecutor::StopTimer(Stream *stream, Timer *timer) {
 }
 
 port::Status ROCMExecutor::BlockHostUntilDone(Stream *stream) {
-  return ROCMDriver::SynchronizeStream(device_ordinal_, AsROCMStreamValue(stream));
+  return ROCMDriver::SynchronizeStream(context_, AsROCMStreamValue(stream));
 }
 
 blas::BlasSupport *ROCMExecutor::CreateBlas() {
@@ -667,28 +677,28 @@ bool ROCMExecutor::SupportsDnn() const {
 
 bool ROCMExecutor::CanEnablePeerAccessTo(StreamExecutorInterface *other) {
   ROCMExecutor *rocm_other = static_cast<ROCMExecutor *>(other);
-  return ROCMDriver::CanEnablePeerAccess(device_ordinal_, rocm_other->device_ordinal());
+  return ROCMDriver::CanEnablePeerAccess(context_, rocm_other->context_);
 }
 
 port::Status ROCMExecutor::EnablePeerAccessTo(StreamExecutorInterface *other) {
   ROCMExecutor *rocm_other = static_cast<ROCMExecutor *>(other);
-  return ROCMDriver::EnablePeerAccess(device_ordinal_, rocm_other->device_ordinal());
+  return ROCMDriver::EnablePeerAccess(context_, rocm_other->context_);
 }
 
 SharedMemoryConfig ROCMExecutor::GetDeviceSharedMemoryConfig() {
-  port::StatusOr<hipSharedMemConfig> rocm_config =
-      ROCMDriver::DeviceGetSharedMemConfig(device_ordinal_);
+  port::StatusOr<HUsharedconfig> rocm_config =
+      ROCMDriver::ContextGetSharedMemConfig(context_);
   if (!rocm_config.ok()) {
     // Don't log; the failed call will log necessary output.
     return SharedMemoryConfig::kDefault;
   }
 
   switch (rocm_config.ValueOrDie()) {
-    case hipSharedMemBankSizeDefault:
+    case HU_SHARED_MEM_CONFIG_DEFAULT_BANK_SIZE:
       return SharedMemoryConfig::kDefault;
-    case hipSharedMemBankSizeFourByte:
+    case HU_SHARED_MEM_CONFIG_FOUR_BYTE_BANK_SIZE:
       return SharedMemoryConfig::kFourByte;
-    case hipSharedMemBankSizeEightByte:
+    case HU_SHARED_MEM_CONFIG_EIGHT_BYTE_BANK_SIZE:
       return SharedMemoryConfig::kEightByte;
     default:
       LOG(FATAL) << "Invalid shared memory configuration returned: "
@@ -698,34 +708,35 @@ SharedMemoryConfig ROCMExecutor::GetDeviceSharedMemoryConfig() {
 
 port::Status ROCMExecutor::SetDeviceSharedMemoryConfig(
     SharedMemoryConfig config) {
-  hipSharedMemConfig rocm_config;
+  HUsharedconfig rocm_config;
   switch (config) {
     case SharedMemoryConfig::kDefault:
-      rocm_config = hipSharedMemBankSizeDefault;
+      rocm_config = HU_SHARED_MEM_CONFIG_DEFAULT_BANK_SIZE;
       break;
     case SharedMemoryConfig::kFourByte:
-      rocm_config = hipSharedMemBankSizeFourByte;
+      rocm_config = HU_SHARED_MEM_CONFIG_FOUR_BYTE_BANK_SIZE;
       break;
     case SharedMemoryConfig::kEightByte:
-      rocm_config = hipSharedMemBankSizeEightByte;
+      rocm_config = HU_SHARED_MEM_CONFIG_EIGHT_BYTE_BANK_SIZE;
       break;
     default:
       LOG(FATAL) << "Invalid shared memory configuration specified: "
                  << static_cast<int>(config);
   }
-  return ROCMDriver::DeviceSetSharedMemConfig(device_ordinal_, rocm_config);
+  return ROCMDriver::ContextSetSharedMemConfig(context_, rocm_config);
 }
 
 bool ROCMExecutor::DeviceMemoryUsage(int64 *free, int64 *total) const {
-  return ROCMDriver::GetDeviceMemoryInfo(device_ordinal_, free, total);
+  return ROCMDriver::GetDeviceMemoryInfo(context_, free, total);
 }
 
-bool ROCMExecutor::GetSymbol(const string& symbol_name, ModuleHandle module_handle, void **mem,
+bool ROCMExecutor::GetSymbol(const string &symbol_name,
+                             ModuleHandle module_handle, void **mem,
                              size_t *bytes) {
   {  // give limited scope to mutex_lock
     mutex_lock lock{disk_modules_mu_};
     for (auto &it : disk_modules_) {
-      if (ROCMDriver::GetModuleSymbol(device_ordinal_, it.second, symbol_name.c_str(),
+      if (ROCMDriver::GetModuleSymbol(context_, it.second, symbol_name.c_str(),
                                       reinterpret_cast<hipDeviceptr_t *>(mem),
                                       bytes)) {
         return true;
@@ -736,7 +747,7 @@ bool ROCMExecutor::GetSymbol(const string& symbol_name, ModuleHandle module_hand
   {  // give limited scope to mutex_lock
     mutex_lock lock{in_memory_modules_mu_};
     for (auto &it : in_memory_modules_) {
-      if (ROCMDriver::GetModuleSymbol(device_ordinal_, it.second, symbol_name.c_str(),
+      if (ROCMDriver::GetModuleSymbol(context_, it.second, symbol_name.c_str(),
                                       reinterpret_cast<hipDeviceptr_t *>(mem),
                                       bytes)) {
         return true;
@@ -750,7 +761,7 @@ bool ROCMExecutor::GetSymbol(const string& symbol_name, ModuleHandle module_hand
       auto it = gpu_binary_to_module_.find(module_handle.id());
       CHECK(it != gpu_binary_to_module_.end());
       if (ROCMDriver::GetModuleSymbol(
-              device_ordinal_, it->second.first, symbol_name.c_str(),
+              context_, it->second.first, symbol_name.c_str(),
               reinterpret_cast<hipDeviceptr_t*>(mem), bytes)) {
         return true;
       }
@@ -758,7 +769,7 @@ bool ROCMExecutor::GetSymbol(const string& symbol_name, ModuleHandle module_hand
 
     for (auto& it : gpu_binary_to_module_) {
       if (ROCMDriver::GetModuleSymbol(
-              device_ordinal_, it.second.first, symbol_name.c_str(),
+              context_, it.second.first, symbol_name.c_str(),
               reinterpret_cast<hipDeviceptr_t*>(mem), bytes)) {
         return true;
       }
@@ -811,7 +822,9 @@ ROCMExecutor::GetTimerImplementation() {
   return std::unique_ptr<internal::TimerInterface>(new ROCMTimer(this));
 }
 
-void *ROCMExecutor::GpuContextHack() { return nullptr; }
+void *ROCMExecutor::GpuContextHack() { return context_; }
+
+RocmContext* ROCMExecutor::rocm_context() { return context_; }
 
 // Attempts to read the NUMA node corresponding to the GPU device's PCI bus out
 // of SysFS. Returns -1 if it cannot.
@@ -847,7 +860,7 @@ DeviceDescription *ROCMExecutor::PopulateDeviceDescription() const {
     builder.set_numa_node(numa_node);
   }
 
-  hipDeviceProp_t prop;
+  HUdevprop prop;
   if (ROCMDriver::GetDeviceProperties(&prop, device_ordinal_)) {
     builder.set_threads_per_block_limit(prop.maxThreadsPerBlock);
 
@@ -872,6 +885,20 @@ DeviceDescription *ROCMExecutor::PopulateDeviceDescription() const {
     (void)ROCMDriver::GetDeviceTotalMemory(device_, &device_memory_size);
     builder.set_device_memory_size(device_memory_size);
   }
+
+#if 0
+  port::StatusOr<int> mem_clock_khz = ROCMDriver::GetDeviceAttribute(
+      HU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, device_ordinal_);
+  port::StatusOr<int> mem_bus_width_bits = ROCMDriver::GetDeviceAttribute(
+      HU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH, device_ordinal_);
+  if (mem_clock_khz.ok() && mem_bus_width_bits.ok()) {
+    // Times 2 because HBM is DDR memory; it gets two data bits per each data
+    // lane.
+    builder.set_memory_bandwidth(2 * int64_t{mem_clock_khz.ValueOrDie()} *
+                                 1000 *
+                                 int64_t{mem_bus_width_bits.ValueOrDie()} / 8);
+  }
+#endif
 
   {
     BlockDim block_dim_limit;
@@ -922,5 +949,6 @@ void initialize_rocm_gpu_executor() {
 
 }  // namespace stream_executor
 
-REGISTER_MODULE_INITIALIZER(
-    rocm_gpu_executor, {stream_executor::initialize_rocm_gpu_executor();});
+REGISTER_MODULE_INITIALIZER(rocm_gpu_executor, {
+  stream_executor::initialize_rocm_gpu_executor();
+});

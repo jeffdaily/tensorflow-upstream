@@ -28,22 +28,22 @@ ROCMEvent::ROCMEvent(ROCMExecutor* parent)
 ROCMEvent::~ROCMEvent() {}
 
 port::Status ROCMEvent::Init() {
-  return ROCMDriver::CreateEvent(parent_->device_ordinal(), &rocm_event_,
+  return ROCMDriver::CreateEvent(parent_->rocm_context(), &rocm_event_,
                                  ROCMDriver::EventFlags::kDisableTiming);
 }
 
 port::Status ROCMEvent::Destroy() {
-  return ROCMDriver::DestroyEvent(parent_->device_ordinal(), &rocm_event_);
+  return ROCMDriver::DestroyEvent(parent_->rocm_context(), &rocm_event_);
 }
 
 port::Status ROCMEvent::Record(ROCMStream* stream) {
-  return ROCMDriver::RecordEvent(parent_->device_ordinal(), rocm_event_,
+  return ROCMDriver::RecordEvent(parent_->rocm_context(), rocm_event_,
                                  stream->rocm_stream());
 }
 
 Event::Status ROCMEvent::PollForStatus() {
-  port::StatusOr<hipError_t> status =
-      ROCMDriver::QueryEvent(parent_->device_ordinal(), rocm_event_);
+  port::StatusOr<HUresult> status =
+      ROCMDriver::QueryEvent(parent_->rocm_context(), rocm_event_);
   if (!status.ok()) {
     LOG(ERROR) << "Error polling for event status: "
                << status.status().error_message();
@@ -51,9 +51,9 @@ Event::Status ROCMEvent::PollForStatus() {
   }
 
   switch (status.ValueOrDie()) {
-    case hipSuccess:
+    case HIP_SUCCESS:
       return Event::Status::kComplete;
-    case hipErrorNotReady:
+    case HIP_ERROR_NOT_READY:
       return Event::Status::kPending;
     default:
       LOG(INFO) << "Error condition returned for event status: "
@@ -62,7 +62,7 @@ Event::Status ROCMEvent::PollForStatus() {
   }
 }
 
-const hipEvent_t& ROCMEvent::rocm_event() {
+const HUevent& ROCMEvent::rocm_event() {
   return rocm_event_;
 }
 
