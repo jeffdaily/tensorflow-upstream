@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/nccl/nccl_manager.h"
 
+#include <sys/time.h>
 #include <utility>
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -27,6 +28,13 @@ limitations under the License.
 #endif
 
 namespace tensorflow {
+
+    static bool NCCL_TF_DEBUG = (getenv("NCCL_TF_DEBUG") != nullptr);
+    static suseconds_t get_host_timestamp() {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        return tv.tv_sec * 1e6 + tv.tv_usec;
+    }
 
 #if GOOGLE_CUDA
 using se::cuda::ScopedActivateExecutorContext;
@@ -175,6 +183,10 @@ struct NcclManager::Collective {
         reduction_op(reduction_op_in),
         remaining_participants(num_devices) {
     participants.reserve(num_devices);
+  }
+
+  ~Collective() {
+    if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld Collective destructor\n", get_host_timestamp());
   }
 
   const DataType data_type;
@@ -518,6 +530,7 @@ void NcclManager::LoopKernelLaunches(NcclStream* nccl_stream) {
         const void* sendbuff = p->in_t->tensor_data().data();
         void* recvbuff = const_cast<char*>(p->out_t->tensor_data().data());
 
+        if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld calls ncclAllReduce sendbuff=%p recvbuff=%p count=%zu type=%d op=%d comm=%p stream=%p\n", get_host_timestamp(), sendbuff, recvbuff, size_t(p->in_t->NumElements()), data_type, collective->reduction_op, nccl_comm, cu_stream);
         nccl_result =
             ncclAllReduce(sendbuff, recvbuff, p->in_t->NumElements(), data_type,
                           collective->reduction_op, nccl_comm, *cu_stream);
@@ -526,6 +539,7 @@ void NcclManager::LoopKernelLaunches(NcclStream* nccl_stream) {
       case kBroadcast: {
         const Tensor* buf_t = p->in_t ? p->in_t : p->out_t;
         void* buf = const_cast<char*>(buf_t->tensor_data().data());
+        if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld calls ncclBcast buf=%p count=%zu type=%d root=%d comm=%p stream=%p\n", get_host_timestamp(), buf, size_t(buf_t->NumElements()), data_type, collective->root_rank, nccl_comm, cu_stream);
         nccl_result = ncclBcast(buf, buf_t->NumElements(), data_type,
                                 collective->root_rank, nccl_comm, *cu_stream);
         break;
@@ -535,6 +549,7 @@ void NcclManager::LoopKernelLaunches(NcclStream* nccl_stream) {
         void* recvbuff = p->out_t
                              ? const_cast<char*>(p->out_t->tensor_data().data())
                              : nullptr;
+        if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld calls ncclAllReduce sendbuff=%p recvbuff=%p count=%zu type=%d op=%d root=%d comm=%p stream=%p\n", get_host_timestamp(), sendbuff, recvbuff, size_t(p->in_t->NumElements()), data_type, collective->reduction_op, collective->root_rank, nccl_comm, cu_stream);
         nccl_result = ncclReduce(sendbuff, recvbuff, p->in_t->NumElements(),
                                  data_type, collective->reduction_op,
                                  collective->root_rank, nccl_comm, *cu_stream);
@@ -544,6 +559,7 @@ void NcclManager::LoopKernelLaunches(NcclStream* nccl_stream) {
 
     // Run the done_callback when the nccl kernel finishes running.
     auto done_callback = [collective, rank, nccl_result]() {
+      if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld done_callback op=%d\n", get_host_timestamp(), collective->reduction_op);
       if (nccl_result == ncclSuccess) {
         collective->participants[rank]->done_callback(Status::OK());
       } else {
