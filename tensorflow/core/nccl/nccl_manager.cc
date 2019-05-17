@@ -525,12 +525,25 @@ void NcclManager::LoopKernelLaunches(NcclStream* nccl_stream) {
 
     auto nccl_comm = collective->communicator->members[rank].nccl_comm;
     ncclResult_t nccl_result = ncclSuccess;
+    std::ostringstream os;
+    std::string msg;
+    suseconds_t start = NCCL_TF_DEBUG ? get_host_timestamp() : 0;
     switch (collective->type) {
       case kAllReduce: {
         const void* sendbuff = p->in_t->tensor_data().data();
         void* recvbuff = const_cast<char*>(p->out_t->tensor_data().data());
 
-        if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld calls ncclAllReduce sendbuff=%p recvbuff=%p count=%zu type=%d op=%d comm=%p stream=%p\n", get_host_timestamp(), sendbuff, recvbuff, size_t(p->in_t->NumElements()), data_type, collective->reduction_op, nccl_comm, cu_stream);
+        if (NCCL_TF_DEBUG) {
+            os << "NcclManager ncclAllReduce ts=" << start
+                << " rank=" << rank
+                << " sendbuf=" << sendbuff
+                << " recvbuff=" << recvbuff
+                << " count=" << p->in_t->NumElements()
+                << " type=" << data_type
+                << " op=" << collective->reduction_op
+                << " comm=" << nccl_comm
+                << " stream=" << cu_stream;
+        }
         nccl_result =
             ncclAllReduce(sendbuff, recvbuff, p->in_t->NumElements(), data_type,
                           collective->reduction_op, nccl_comm, *cu_stream);
@@ -539,7 +552,16 @@ void NcclManager::LoopKernelLaunches(NcclStream* nccl_stream) {
       case kBroadcast: {
         const Tensor* buf_t = p->in_t ? p->in_t : p->out_t;
         void* buf = const_cast<char*>(buf_t->tensor_data().data());
-        if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld calls ncclBcast buf=%p count=%zu type=%d root=%d comm=%p stream=%p\n", get_host_timestamp(), buf, size_t(buf_t->NumElements()), data_type, collective->root_rank, nccl_comm, cu_stream);
+        if (NCCL_TF_DEBUG) {
+            os << "NcclManager     ncclBcast ts=" << start
+                << " rank=" << rank
+                << " buf=" << buf
+                << " count=" << buf_t->NumElements()
+                << " type=" << data_type
+                << " root=" << collective->root_rank
+                << " comm=" << nccl_comm
+                << " stream=" << cu_stream;
+        }
         nccl_result = ncclBcast(buf, buf_t->NumElements(), data_type,
                                 collective->root_rank, nccl_comm, *cu_stream);
         break;
@@ -549,17 +571,32 @@ void NcclManager::LoopKernelLaunches(NcclStream* nccl_stream) {
         void* recvbuff = p->out_t
                              ? const_cast<char*>(p->out_t->tensor_data().data())
                              : nullptr;
-        if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld calls ncclAllReduce sendbuff=%p recvbuff=%p count=%zu type=%d op=%d root=%d comm=%p stream=%p\n", get_host_timestamp(), sendbuff, recvbuff, size_t(p->in_t->NumElements()), data_type, collective->reduction_op, collective->root_rank, nccl_comm, cu_stream);
+        if (NCCL_TF_DEBUG) {
+            os << "NcclManager ncclAllReduce ts=" << start
+                << " rank=" << rank
+                << " sendbuff=" << sendbuff
+                << " recvbuff=" << recvbuff
+                << " count=" << p->in_t->NumElements()
+                << " type=" << data_type
+                << " op=" << collective->reduction_op
+                << " root=" << collective->root_rank
+                << " comm=" << nccl_comm
+                << " stream=" << cu_stream;
+        }
         nccl_result = ncclReduce(sendbuff, recvbuff, p->in_t->NumElements(),
                                  data_type, collective->reduction_op,
                                  collective->root_rank, nccl_comm, *cu_stream);
         break;
       }
     }
+    if (NCCL_TF_DEBUG) msg = os.str();
 
     // Run the done_callback when the nccl kernel finishes running.
-    auto done_callback = [collective, rank, nccl_result]() {
-      if (NCCL_TF_DEBUG) fprintf(stderr, "NcclManager %ld done_callback op=%d\n", get_host_timestamp(), collective->reduction_op);
+    auto done_callback = [collective, rank, nccl_result, start, msg]() {
+      if (NCCL_TF_DEBUG) {
+          suseconds_t stop = get_host_timestamp();
+          fprintf(stderr, "%s stop=%ld diff=%ld\n", msg.c_str(), stop, stop-start);
+      }
       if (nccl_result == ncclSuccess) {
         collective->participants[rank]->done_callback(Status::OK());
       } else {
