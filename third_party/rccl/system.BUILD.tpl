@@ -10,7 +10,7 @@ cc_library(
     include_prefix = "third_party/rccl",
     visibility = ["//visibility:public"],
     deps = [
-        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_rocm//rocm:rocm_headers",
     ],
 )
 
@@ -20,6 +20,8 @@ genrule(
         "librccl.so",
         "rccl.h",
     ],
-    cmd = """cp "%{hdr_path}/rccl.h" "$(@D)/rccl.h" &&
-           cp "%{install_path}/librccl.so" "$(@D)/librccl.so" """,
+    cmd = """
+cp "%{rccl_header_dir}/rccl.h" "$(@D)/rccl.h" &&
+cp "%{rccl_library_dir}/librccl.so" "$(@D)/librccl.so"
+""",
 )

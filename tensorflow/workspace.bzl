@@ -612,6 +612,17 @@ def tf_workspace(path_prefix = "", tf_repo_name = ""):
     )
 
     tf_http_archive(
+        name = "rccl_archive",
+        build_file = clean_dep("//third_party:rccl/archive.BUILD"),
+        sha256 = "dbdd80cbd42709fa05590b1666a2c783f3618cb1efa0d91c1c018a0fe4630193",
+        strip_prefix = "rccl-e6a0da444ff98062259888cdb9d73c30df84ef1c",
+        urls = [
+            "http://mirror.tensorflow.org/github.com/ROCmSoftwarePlatform/rccl/archive/e6a0da444ff98062259888cdb9d73c30df84ef1c.tar.gz",
+            "https://github.com/ROCmSoftwarePlatform/rccl/archive/e6a0da444ff98062259888cdb9d73c30df84ef1c.tar.gz",
+        ],
+    )
+
+    tf_http_archive(
         name = "kafka",
         build_file = clean_dep("//third_party:kafka/BUILD"),
         patch_file = clean_dep("//third_party/kafka:config.patch"),
