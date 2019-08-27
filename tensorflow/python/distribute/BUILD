@@ -172,9 +172,6 @@ py_test(
     srcs = ["distribute_lib_test.py"],
     python_version = "PY2",
     srcs_version = "PY2AND3",
-    tags = [
-        "no_rocm",
-    ],
     deps = [
         ":combinations",
         ":distribute_lib",
@@ -877,7 +874,6 @@ distribute_py_test(
     main = "minimize_loss_test.py",
     tags = [
         "multi_and_single_gpu",
-        "no_rocm",
     ],
     deps = [
         ":mirrored_strategy",
@@ -930,7 +926,6 @@ distribute_py_test(
     main = "step_fn_test.py",
     tags = [
         "multi_and_single_gpu",
-        "no_rocm",
     ],
     deps = [
         ":single_loss_example",
@@ -991,7 +986,6 @@ cuda_py_test(
     tags = [
         "guitar",
         "multi_and_single_gpu",
-        "no_rocm",
         "no_windows_gpu",  # TODO(b/130551176)
     ],
     xla_enable_strict_auto_jit = True,
