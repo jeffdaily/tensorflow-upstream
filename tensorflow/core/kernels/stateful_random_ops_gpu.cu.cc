@@ -29,6 +29,7 @@ limitations under the License.
 namespace tensorflow {
 
 using random::PhiloxRandom;
+using GPUDevice = Eigen::GpuDevice;
 
 __device__ int thread_counter;
 
@@ -57,37 +58,38 @@ __global__ void FillKernel(
 }
 
 template <typename Distribution>
-void UpdateVariableAndFill_Philox<GPUDevice, Distribution>::operator()(
-    OpKernelContext* ctx, const GPUDevice& d, Distribution dist,
-    int64 output_size, int64 alg_tag_skip, ScopedUnlockUnrefVar* not_used,
-    Tensor* state_tensor,
-    typename Distribution::ResultElementType* output_data) {
-  OP_REQUIRES(
-      ctx, alg_tag_skip == 0,
-      errors::InvalidArgument(
-          "GPU kernel doesn't support reading algorithm from state variable, "
-          "so alg_tag_skip must be 0; got",
-          alg_tag_skip));
-  auto state_tensor_flat = state_tensor->flat<StateElementType>();
-  auto state_size = state_tensor_flat.size();
-  auto state_data = state_tensor_flat.data();
+struct UpdateVariableAndFill_Philox<GPUDevice, Distribution> {
+  void operator()(OpKernelContext* ctx, const GPUDevice& d,
+                  Distribution dist, int64 output_size, int64 alg_tag_skip,
+                  ScopedUnlockUnrefVar* not_used, Tensor* state_tensor,
+                  typename Distribution::ResultElementType* output_data) {
+    OP_REQUIRES(
+        ctx, alg_tag_skip == 0,
+        errors::InvalidArgument(
+            "GPU kernel doesn't support reading algorithm from state variable, "
+            "so alg_tag_skip must be 0; got",
+            alg_tag_skip));
+    auto state_tensor_flat = state_tensor->flat<StateElementType>();
+    auto state_size = state_tensor_flat.size();
+    auto state_data = state_tensor_flat.data();
 
-  // maximize occupancy
-  const int kGroupSize = Distribution::kResultElementCount;
-  int work_element_count = (output_size + kGroupSize - 1) / kGroupSize;
-  GpuLaunchConfig cfg =
-      GetGpuLaunchConfig(work_element_count, d, FillKernel<Distribution>, 0, 0);
+    // maximize occupancy
+    const int kGroupSize = Distribution::kResultElementCount;
+    int work_element_count = (output_size + kGroupSize - 1) / kGroupSize;
+    GpuLaunchConfig cfg =
+        GetGpuLaunchConfig(work_element_count, d, FillKernel<Distribution>, 0, 0);
 
-  int zero = 0;
+    int zero = 0;
 #if GOOGLE_CUDA
-  cudaMemcpyToSymbol(thread_counter, &zero, sizeof(int));
+    cudaMemcpyToSymbol(thread_counter, &zero, sizeof(int));
 #else  // TENSORFLOW_USE_ROCM
-  hipMemcpyToSymbol(HIP_SYMBOL(thread_counter), &zero, sizeof(int));
+    hipMemcpyToSymbol(HIP_SYMBOL(thread_counter), &zero, sizeof(int));
 #endif
-  TF_CHECK_OK(GpuLaunchKernel(
-      FillKernel<Distribution>, cfg.block_count, cfg.thread_per_block, 0,
-      d.stream(), dist, state_size, output_size, state_data, output_data));
-}
+    TF_CHECK_OK(GpuLaunchKernel(
+        FillKernel<Distribution>, cfg.block_count, cfg.thread_per_block, 0,
+        d.stream(), dist, state_size, output_size, state_data, output_data));
+  }
+};
 
 // Precondition: there is only 1 block and 1 thread.
 __global__ void SkipKernel(int64 delta,
@@ -96,57 +98,32 @@ __global__ void SkipKernel(int64 delta,
   UpdateMemWithPhiloxRandom(philox, delta, state_data);
 }
 
-void RngSkip_Philox<GPUDevice>::operator()(const GPUDevice& d, int64 delta,
-                                           Tensor* state_tensor) {
-  TF_CHECK_OK(GpuLaunchKernel(SkipKernel, 1, 1, 0, d.stream(), delta,
-                              state_tensor->flat<StateElementType>().data()));
-}
+template <>
+struct RngSkip_Philox<GPUDevice> {
+  void operator()(const GPUDevice& d, int64 delta, Tensor* state_tensor) {
+    TF_CHECK_OK(GpuLaunchKernel(SkipKernel, 1, 1, 0, d.stream(), delta,
+                                state_tensor->flat<StateElementType>().data()));
+  }
+};
 
-// Explicit instantiation of the GPU distributions functors.
+#define REGISTER_FloatOps_GPU(TYPE) REGISTER_FloatOps(GPU, TYPE)
+TF_CALL_half(REGISTER_FloatOps_GPU);
+TF_CALL_float(REGISTER_FloatOps_GPU);
+TF_CALL_double(REGISTER_FloatOps_GPU);
 
-// clang-format off
-// NVCC cannot handle ">>" properly
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::NormalDistribution<random::PhiloxRandom, Eigen::half> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::NormalDistribution<random::PhiloxRandom, float> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::NormalDistribution<random::PhiloxRandom, double> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::TruncatedNormalDistribution<
-                 random::SingleSampleAdapter<random::PhiloxRandom>,
-                 Eigen::half> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::TruncatedNormalDistribution<
-                 random::SingleSampleAdapter<random::PhiloxRandom>,
-                 float> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::TruncatedNormalDistribution<
-                 random::SingleSampleAdapter<random::PhiloxRandom>,
-                 double> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformDistribution<random::PhiloxRandom, Eigen::half> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformDistribution<random::PhiloxRandom, float> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformDistribution<random::PhiloxRandom, double> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformDistribution<random::PhiloxRandom, int32> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformDistribution<random::PhiloxRandom, int64> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformFullIntDistribution<
-                 random::PhiloxRandom, int32> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformFullIntDistribution<
-                 random::PhiloxRandom, int64> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformFullIntDistribution<
-                 random::PhiloxRandom, uint32> >;
-template struct UpdateVariableAndFill_Philox<
-    GPUDevice, random::UniformFullIntDistribution<
-                 random::PhiloxRandom, uint64> >;
-// clang-format on
+#define REGISTER_StatefulUniformInt_GPU(TYPE) \
+  REGISTER_StatefulUniformInt(GPU, TYPE)
+TF_CALL_int32(REGISTER_StatefulUniformInt_GPU);
+TF_CALL_int64(REGISTER_StatefulUniformInt_GPU);
+
+#define REGISTER_StatefulUniformFullInt_GPU(TYPE) \
+  REGISTER_StatefulUniformFullInt(GPU, TYPE)
+TF_CALL_int32(REGISTER_StatefulUniformFullInt_GPU);
+TF_CALL_int64(REGISTER_StatefulUniformFullInt_GPU);
+TF_CALL_uint32(REGISTER_StatefulUniformFullInt_GPU);
+TF_CALL_uint64(REGISTER_StatefulUniformFullInt_GPU);
+
+REGISTER_RngSkip(GPU);
 
 }  // end namespace tensorflow
 
