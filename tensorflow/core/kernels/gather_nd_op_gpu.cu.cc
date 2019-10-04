@@ -35,7 +35,11 @@ __global__ void GatherSliceOpKernel(
   // TODO(ebrevdo): reduce inner loop into two loops:
   // one over the number of locs, and one over the offsets inside the locs.
   GPU_1D_KERNEL_LOOP(i, out_size) {
+#if TENSORFLOW_USE_ROCM
+    const Index loc = i * __frcp_rn(slice_size);
+#else
     const Index loc = i / slice_size;
+#endif
     const auto indices_i = indices + IXDIM * loc;
     bool out_of_bounds = false;
     Index offset = 0;
