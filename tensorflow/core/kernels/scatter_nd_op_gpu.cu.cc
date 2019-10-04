@@ -89,7 +89,10 @@ __global__ void ScatterNdOpKernel(
   GPU_1D_KERNEL_LOOP(index, num_indices) {
     Index i = 0;
     bool out_of_bounds = false;
+#if TENSORFLOW_USE_ROCM
+#else
 #pragma unroll
+#endif
     for (int dim = 0; dim < IXDIM; ++dim) {
       int offset = (IXDIM * index + dim);
       const Index ix_d = internal::SubtleMustCopy(ldg(indices + offset));
@@ -97,7 +100,10 @@ __global__ void ScatterNdOpKernel(
       i += ix_d * batch_strides[dim] * slice_size;
     }
     if (!out_of_bounds) {
+#if TENSORFLOW_USE_ROCM
+#else
 #pragma unroll
+#endif
       for (int si = 0; si < slice_size; si++) {
         update(out + i + si, ldg(updates + (index * slice_size + si)));
       }
