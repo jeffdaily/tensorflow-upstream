@@ -84,6 +84,45 @@ __global__ void ScatterNdOpKernel(
     const Eigen::array<Eigen::DenseIndex, IXDIM> output_shape_prefix,
     const Eigen::array<int64, IXDIM> batch_strides, const int64 num_indices,
     const Index slice_size) {
+#if TENSORFLOW_USE_ROCM
+  auto update = LeftUpdate<T, op>();
+
+  GPU_1D_KERNEL_LOOP(index, num_indices) {
+    Index i = 0;
+    bool out_of_bounds = false;
+    for (int dim = 0; dim < IXDIM; ++dim) {
+      int offset = (IXDIM * index + dim);
+      const Index ix_d = internal::SubtleMustCopy(__ldg(indices + offset));
+      out_of_bounds |= !FastBoundsCheck(ix_d, output_shape_prefix[dim]);
+      i += ix_d * batch_strides[dim] * slice_size;
+    }
+    if (!out_of_bounds) {
+      T tmp[4];
+      auto pi = updates + index * slice_size;
+      auto po = out + i;
+      auto n = slice_size;
+      while (n >= 4) {
+          tmp[0] = __ldg(pi[0]);
+          tmp[1] = __ldg(pi[1]);
+          tmp[2] = __ldg(pi[2]);
+          tmp[3] = __ldg(pi[3]);
+          n -= 4;
+          pi += 4;
+          update(po[0], tmp[0]);
+          update(po[1], tmp[1]);
+          update(po[2], tmp[2]);
+          update(po[3], tmp[3]);
+          po += 4;
+      }
+      switch (n) {
+          case 3: update(po[2], __ldg(pi[2]));
+          case 2: update(po[1], __ldg(pi[1]));
+          case 1: update(po[0], __ldg(pi[0]));
+          default: break;
+      }
+    }
+  }
+#else
   auto update = LeftUpdate<T, op>();
 
   GPU_1D_KERNEL_LOOP(index, num_indices) {
@@ -103,6 +142,7 @@ __global__ void ScatterNdOpKernel(
       }
     }
   }
+#endif
 }
 
 namespace functor {
