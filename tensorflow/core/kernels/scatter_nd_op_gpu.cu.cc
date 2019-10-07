@@ -102,10 +102,10 @@ __global__ void ScatterNdOpKernel(
       auto po = out + i;
       auto n = slice_size;
       while (n >= 4) {
-          tmp[0] = __ldg(pi[0]);
-          tmp[1] = __ldg(pi[1]);
-          tmp[2] = __ldg(pi[2]);
-          tmp[3] = __ldg(pi[3]);
+          tmp[0] = __ldg(&pi[0]);
+          tmp[1] = __ldg(&pi[1]);
+          tmp[2] = __ldg(&pi[2]);
+          tmp[3] = __ldg(&pi[3]);
           n -= 4;
           pi += 4;
           update(po[0], tmp[0]);
@@ -115,9 +115,9 @@ __global__ void ScatterNdOpKernel(
           po += 4;
       }
       switch (n) {
-          case 3: update(po[2], __ldg(pi[2]));
-          case 2: update(po[1], __ldg(pi[1]));
-          case 1: update(po[0], __ldg(pi[0]));
+          case 3: update(po[2], __ldg(&pi[2]));
+          case 2: update(po[1], __ldg(&pi[1]));
+          case 1: update(po[0], __ldg(&pi[0]));
           default: break;
       }
     }
